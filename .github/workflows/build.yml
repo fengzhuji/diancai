@@ -19,17 +19,21 @@ jobs:
         with:
           python-version: "3.12"
 
-      - name: 安装 PyInstaller
+      - name: 安装依赖
         run: |
           python -m pip install --upgrade pip
+          # 这里是关键！必须安装你的 requirements.txt，否则库根本不存在
+          pip install -r requirements.txt
           pip install pyinstaller
 
-      - name: 打包 EXE
+      - name: 打包 EXE (使用 --onedir 模式以支持外部 image 文件夹)
         run: |
-          pyinstaller --onefile --windowed diancai.py
+          # --onedir 模式会生成一个包含 exe 和依赖库的文件夹，非常适合配合外部 image 文件夹使用
+          pyinstaller --noconsole --onedir --name diancai diancai.py
 
       - name: 保存 EXE
         uses: actions/upload-artifact@v4
         with:
           name: diancai-windows
-          path: dist/diancai.exe
+          # 这里指向生成的整个文件夹，而不是单个 exe 文件
+          path: dist/diancai/
