@@ -5,9 +5,12 @@ import shutil
 import sqlite3
 import sys
 import tkinter as tk
-from tkinter import filedialog, messagebox, ttk
+from tkinter import filedialog, messagebox, simpledialog, ttk
 import openpyxl
 from PIL import Image, ImageDraw, ImageFont, ImageTk
+
+# --- 全局配置参数 ---
+BG_COLOR = "#f3e3e3"  # 统一的显示框底色参数（可在此处修改颜色，如 "lightgray" 或 "#e0e0e0"）
 
 # --- 动态获取当前路径（完美适配 Python 运行及 PyInstaller 打包后的 exe） ---
 if getattr(sys, "frozen", False):
@@ -265,7 +268,9 @@ class PageOrdering(tk.Frame):
     cart_container = tk.Frame(self.middle_pane)
     cart_container.pack(fill=tk.BOTH, expand=True, pady=5)
 
-    self.cart_canvas = tk.Canvas(cart_container, bg="white", highlightthickness=0)
+    self.cart_canvas = tk.Canvas(
+        cart_container, bg=BG_COLOR, highlightthickness=0
+    )
     cart_scrollbar = ttk.Scrollbar(
         cart_container, orient="vertical", command=self.cart_canvas.yview
     )
@@ -485,7 +490,7 @@ class PageOrdering(tk.Frame):
         cat_frame = ttk.Frame(self.notebook)
         self.notebook.add(cat_frame, text=f"  {cat}  ")
 
-        canvas = tk.Canvas(cat_frame, bg="white", highlightthickness=0)
+        canvas = tk.Canvas(cat_frame, bg=BG_COLOR, highlightthickness=0)
         scrollbar = ttk.Scrollbar(
             cat_frame, orient="vertical", command=canvas.yview
         )
@@ -554,9 +559,10 @@ class PageOrdering(tk.Frame):
     conn = sqlite3.connect(DB_NAME)
     try:
       cursor = conn.cursor()
+      # 仅查询前台正常提交的订单（过滤掉后台根据流水生成的随机订单凭证）
       cursor.execute(
-          "SELECT id, order_time, items_detail, total_amount FROM orders ORDER"
-          " BY id DESC"
+          "SELECT id, order_time, items_detail, total_amount FROM orders WHERE"
+          " trans_id IS NULL ORDER BY id DESC"
       )
       for row in cursor.fetchall():
         self.order_tree.insert(
@@ -573,8 +579,11 @@ class PageOrdering(tk.Frame):
       conn = sqlite3.connect(DB_NAME)
       try:
         cursor = conn.cursor()
-        cursor.execute("DELETE FROM orders")
-        cursor.execute("DELETE FROM order_items")
+        cursor.execute("DELETE FROM orders WHERE trans_id IS NULL")
+        cursor.execute(
+            "DELETE FROM order_items WHERE order_id NOT IN (SELECT id FROM"
+            " orders)"
+        )
         conn.commit()
       finally:
         conn.close()
@@ -700,7 +709,7 @@ class PageOrdering(tk.Frame):
             btn_frame,
             text=str(count),
             font=("Arial", 9),
-            bg="white",
+            bg=BG_COLOR,
             relief="sunken",
             width=2,
             anchor="center",
@@ -813,6 +822,8 @@ class PageOrdering(tk.Frame):
 
 
 # --- 第二页：后台管理中心 ---
+
+
 class PageAdmin(tk.Frame):
 
   def __init__(self, parent, page1_ref):
@@ -821,21 +832,42 @@ class PageAdmin(tk.Frame):
     self.page1_ref = page1_ref
     self.image_cache = {}
 
+    # 记录是否已通过验证
+    self.transaction_authorized = False
+
     self.admin_notebook = ttk.Notebook(self)
     self.admin_notebook.pack(fill=tk.BOTH, expand=True, padx=10, pady=10)
+
+    # 绑定标签页切换事件用于权限拦截
+    self.admin_notebook.bind("<<NotebookTabChanged>>", self.on_tab_change)
 
     self.tab_dishes = ttk.Frame(self.admin_notebook)
     self.tab_transactions = ttk.Frame(self.admin_notebook)
 
     self.admin_notebook.add(self.tab_dishes, text="  🍜 菜品管理  ")
-    self.admin_notebook.add(self.tab_transactions, text="  📊 交易流水与智能订单生成  ")
+    self.admin_notebook.add(self.tab_transactions, text="  📊 订单管理 ")
 
+    # 仅初始化菜品管理界面
     self.setup_dish_management_ui()
-    self.setup_transaction_ui()
+
+  def on_tab_change(self, event):
+    """标签页切换时的密码验证拦截与按需加载逻辑"""
+    selected_index = self.admin_notebook.index(self.admin_notebook.select())
+    if selected_index == 1 and not self.transaction_authorized:
+      password = simpledialog.askstring("身份验证", "请输入管理员密码:", show="*")
+      if password == "admin":
+        self.transaction_authorized = True
+        # 只有在密码验证通过的一瞬间，才开始构建和渲染交易流水页面的所有UI与数据
+        self.setup_transaction_ui()
+        self.refresh_transaction_tree()
+      else:
+        messagebox.showinfo("提示", "正在开发中")
+        self.admin_notebook.select(0)
 
   def refresh_data(self):
     self.refresh_dish_tree()
-    self.refresh_transaction_tree()
+    if self.transaction_authorized:
+      self.refresh_transaction_tree()
 
   def setup_dish_management_ui(self):
     dish_layout = ttk.Frame(self.tab_dishes, padding=10)
@@ -1148,11 +1180,11 @@ class PageAdmin(tk.Frame):
         font=("Arial", 9, "bold"),
     ).pack(anchor="w", pady=(10, 2))
 
-    detail_container = tk.Frame(right_container, bg="white")
+    detail_container = tk.Frame(right_container, bg=BG_COLOR)
     detail_container.pack(side=tk.TOP, fill=tk.BOTH, expand=True, pady=2)
 
     self.detail_canvas = tk.Canvas(
-        detail_container, bg="white", highlightthickness=0
+        detail_container, bg=BG_COLOR, highlightthickness=0
     )
     detail_scrollbar = ttk.Scrollbar(
         detail_container, orient="vertical", command=self.detail_canvas.yview
@@ -1244,6 +1276,14 @@ class PageAdmin(tk.Frame):
       conn = sqlite3.connect(DB_NAME)
       try:
         cursor = conn.cursor()
+        # 导入前先清空原有的交易流水及关联的生成订单数据
+        cursor.execute(
+            "DELETE FROM order_items WHERE order_id IN (SELECT id FROM orders"
+            " WHERE trans_id IS NOT NULL)"
+        )
+        cursor.execute("DELETE FROM orders WHERE trans_id IS NOT NULL")
+        cursor.execute("DELETE FROM transactions")
+
         count = 0
         for row in rows[1:]:
           if len(row) > max(time_idx, amount_idx):
@@ -1267,7 +1307,7 @@ class PageAdmin(tk.Frame):
         conn.close()
 
       self.refresh_transaction_tree()
-      messagebox.showinfo("成功", f"成功导入 {count} 条交易流水记录！")
+      messagebox.showinfo("成功", f"成功导入 {count} 条交易流水记录！（已清空原有数据）")
     except Exception as e:
       messagebox.showerror("错误", f"导入失败: {e}")
 
@@ -1402,7 +1442,7 @@ class PageAdmin(tk.Frame):
         preview_label = tk.Label(
             self.detail_items_frame,
             image=tk_preview_img,
-            bg="white",
+            bg=BG_COLOR,
             relief="solid",
             borderwidth=1,
         )
@@ -1412,13 +1452,15 @@ class PageAdmin(tk.Frame):
             self.detail_items_frame,
             text="\n【提示】该流水尚未生成随机订单。",
             fg="gray",
-            bg="white",
+            bg=BG_COLOR,
             font=("Arial", 9),
         ).pack(anchor="w", pady=10)
     finally:
       conn.close()
 
   def generate_random_orders_from_transactions(self):
+    import re
+
     condition_rule = self.rule_condition_entry.get().strip()
     conn = sqlite3.connect(DB_NAME)
     try:
@@ -1429,7 +1471,7 @@ class PageAdmin(tk.Frame):
 
       if not all_dishes:
         messagebox.showerror(
-            "错误", "菜品库为空！请先前往菜品管理添加菜品或检查图片目录。"
+            "错误", "菜品库为空！请先添加菜品或检查图片目录。"
         )
         return
 
@@ -1449,33 +1491,31 @@ class PageAdmin(tk.Frame):
       def get_dish_category_type(cat_name, dish_name):
         c_lower = (cat_name or "").lower()
         n_lower = (dish_name or "").lower()
-        if (
-            "酒" in c_lower
-            or "饮" in c_lower
-            or "水" in c_lower
-            or "酒" in n_lower
-            or "饮" in n_lower
-            or "可乐" in n_lower
-            or "雪碧" in n_lower
-            or "啤酒" in n_lower
-            or "果汁" in n_lower
-            or "茶" in n_lower
+        if any(
+            k in c_lower or k in n_lower
+            for k in [
+                "酒",
+                "饮",
+                "水",
+                "可乐",
+                "雪碧",
+                "啤酒",
+                "果汁",
+                "茶",
+            ]
         ):
           return "酒水饮料"
-        elif (
-            "主食" in c_lower
-            or "饭" in n_lower
-            or "面" in n_lower
-            or "粉" in n_lower
-            or "饺" in n_lower
-            or "饼" in n_lower
+        elif any(
+            k in c_lower or k in n_lower for k in ["主食", "饭", "面", "粉", "饺", "饼"]
         ):
           return "主食"
         elif "汤" in c_lower or "汤" in n_lower:
           return "汤类"
-        elif "冷" in c_lower or "凉" in c_lower or "凉菜" in n_lower:
+        elif any(k in c_lower or k in n_lower for k in ["冷", "凉"]):
           return "冷菜"
-        elif "小吃" in c_lower or "甜品" in c_lower or "点心" in n_lower:
+        elif any(
+            k in c_lower or k in n_lower for k in ["小吃", "甜品", "点心"]
+        ):
           return "小吃点心"
         else:
           return "热菜"
@@ -1490,15 +1530,48 @@ class PageAdmin(tk.Frame):
       }
 
       for d in all_dishes:
-        d_id, d_name, d_price, d_cat, d_img = d
+        _, d_name, _, d_cat, _ = d
         c_type = get_dish_category_type(d_cat, d_name)
         categories_dict[c_type].append(d)
 
-      drink_pool = [d for d in categories_dict["酒水饮料"] if d[2] > 0]
-      if not drink_pool:
-        drink_pool = [d for d in all_dishes if d[2] > 0]
-        if not drink_pool:
-          drink_pool = all_dishes
+      parsed_rules = []
+      segments = re.split(r"订单\s*金额", condition_rule)
+      for seg in segments:
+        if not seg.strip():
+          continue
+        seg_text = "订单金额" + seg
+
+        min_amt_match = re.search(r"金额\s*[大超]于\s*(\d+)", seg_text)
+        min_amt = float(min_amt_match.group(1)) if min_amt_match else 0.0
+
+        max_amt_match = re.search(r"金额\s*小于\s*(\d+)", seg_text)
+        max_amt = (
+            float(max_amt_match.group(1)) if max_amt_match else float("inf")
+        )
+
+        is_random = bool(
+            re.search(r"随机生成|随机", seg_text)
+            and not re.search(r"大额|单价", seg_text)
+        )
+
+        price_match = re.search(r"单价\s*小于\s*(\d+)", seg_text)
+        max_price = float(price_match.group(1)) if price_match else 999.0
+
+        qty_match = re.search(r"(\d+)\s*件", seg_text)
+        qty = int(qty_match.group(1)) if qty_match else 1
+
+        high_prio = bool(re.search(r"大额优先|大额菜品优先|优先", seg_text))
+
+        parsed_rules.append({
+            "min_amt": min_amt,
+            "max_amt": max_amt,
+            "max_price": max_price,
+            "qty": qty,
+            "high_prio": high_prio,
+            "is_random": is_random,
+        })
+
+      parsed_rules.sort(key=lambda x: x["min_amt"], reverse=True)
 
       generated_count = 0
 
@@ -1509,25 +1582,54 @@ class PageAdmin(tk.Frame):
         order_cart = {}
         remaining = target_amount
 
-        if "酒" in condition_rule or "含" in condition_rule:
-          valid_drinks = [d for d in drink_pool if 0 < d[2] <= remaining]
-          if not valid_drinks:
-            valid_drinks = drink_pool
-          if valid_drinks:
-            chosen_drink = random.choice(valid_drinks)
-            d_id, d_name, d_price, d_cat, d_img = chosen_drink
-            if d_price <= 0:
-              d_price = 3.0
-            d_count = 1
-            if remaining < d_price:
-              d_price = max(1.0, remaining)
+        matched_rule = None
+        for r in parsed_rules:
+          if r["min_amt"] <= target_amount < r["max_amt"]:
+            matched_rule = r
+            break
 
-            order_cart[d_name] = {
-                "price": d_price,
-                "count": d_count,
-                "image_path": d_img,
-            }
-            remaining -= d_price * d_count
+        if not matched_rule:
+          for r in parsed_rules:
+            if target_amount >= r["min_amt"] and r["max_amt"] == float("inf"):
+              matched_rule = r
+              break
+
+        if not matched_rule:
+          matched_rule = {
+              "min_amt": 0,
+              "max_amt": float("inf"),
+              "max_price": 999,
+              "qty": 1,
+              "high_prio": False,
+              "is_random": True,
+          }
+
+        if not matched_rule["is_random"] and matched_rule["max_price"] < 999:
+          cheap_drinks = [
+              d
+              for d in categories_dict["酒水饮料"]
+              if 0 < d[2] < matched_rule["max_price"]
+          ]
+          if not cheap_drinks:
+            cheap_drinks = [
+                d for d in categories_dict["酒水饮料"] if d[2] > 0
+            ]
+
+          if cheap_drinks:
+            chosen_drink = random.choice(cheap_drinks)
+            _, d_name, d_price, _, d_img = chosen_drink
+
+            d_count = matched_rule["qty"]
+            if d_price * d_count > remaining:
+              d_count = max(1, int(remaining // d_price))
+
+            if d_count > 0:
+              order_cart[d_name] = {
+                  "price": d_price,
+                  "count": d_count,
+                  "image_path": d_img,
+              }
+              remaining -= d_price * d_count
 
         active_categories = [
             cat for cat, items in categories_dict.items() if items
@@ -1535,28 +1637,35 @@ class PageAdmin(tk.Frame):
         if not active_categories:
           active_categories = ["热菜"]
 
-        while remaining > 0:
+        while remaining > 1.0:
           chosen_cat = random.choice(active_categories)
-          cat_dishes = [d for d in categories_dict[chosen_cat] if d[2] > 0]
+          cat_dishes = [
+              d for d in categories_dict[chosen_cat] if 0 < d[2] <= remaining
+          ]
           if not cat_dishes:
-            cat_dishes = [d for d in all_dishes if d[2] > 0]
+            fallback_dishes = []
+            for ac in active_categories:
+              fallback_dishes.extend(
+                  [d for d in categories_dict[ac] if 0 < d[2] <= remaining]
+              )
+            cat_dishes = fallback_dishes
             if not cat_dishes:
-              cat_dishes = all_dishes
+              break
 
-          chosen_dish = random.choice(cat_dishes)
+          if matched_rule["high_prio"]:
+            cat_dishes.sort(key=lambda x: x[2], reverse=True)
+
+          chosen_dish = random.choice(cat_dishes[: max(1, len(cat_dishes) // 2)])
           c_id, c_name, c_price, c_cat, c_img = chosen_dish
 
-          if c_price <= 0:
-            c_price = 1.0
-
-          if remaining >= c_price:
-            max_c = int(remaining // c_price)
-            count = random.randint(1, max(1, min(max_c, 2)))
-          else:
-            count = 1
-            c_price = remaining
-
+          max_c = int(remaining // c_price)
+          count = random.randint(1, max(1, min(max_c, 3))) if max_c > 0 else 1
           sub_cost = c_price * count
+
+          if sub_cost > remaining:
+            count = 1
+            sub_cost = c_price
+
           if c_name in order_cart:
             order_cart[c_name]["count"] += count
           else:
@@ -1567,21 +1676,6 @@ class PageAdmin(tk.Frame):
             }
 
           remaining -= sub_cost
-          if remaining < 0.1:
-            break
-
-        current_total = sum(
-            info["price"] * info["count"] for info in order_cart.values()
-        )
-        if order_cart and abs(current_total - target_amount) > 0.001:
-          first_key = list(order_cart.keys())[0]
-          diff = target_amount - current_total
-          if order_cart[first_key]["count"] > 0:
-            order_cart[first_key]["price"] += (
-                diff / order_cart[first_key]["count"]
-            )
-            if order_cart[first_key]["price"] < 0:
-              order_cart[first_key]["price"] = 1.0
 
         items_desc = ", ".join(
             [f"{name}x{info['count']}" for name, info in order_cart.items()]
@@ -1620,13 +1714,11 @@ class PageAdmin(tk.Frame):
       conn.close()
 
     self.refresh_transaction_tree()
-    self.page1_ref.refresh_order_history()
     messagebox.showinfo(
-        "成功", f"成功为 {generated_count} 条交易流水生成匹配订单！"
+        "成功", f"成功为 {generated_count} 条交易流水智能生成匹配订单！"
     )
 
   def export_orders_excel(self):
-    # 弹出设置窗口，自定义时间跨度统计（默认每天）
     dialog = tk.Toplevel(self)
     dialog.title("导出与统计设置")
     dialog.geometry("320x210")
@@ -1666,7 +1758,6 @@ class PageAdmin(tk.Frame):
       try:
         wb = openpyxl.Workbook()
 
-        # Sheet 1: 订单明细（4列：订单编号、订单时间、订单金额、订单详情）
         ws1 = wb.active
         ws1.title = "订单明细"
         ws1.append(["订单编号", "订单时间", "订单金额 (元)", "订单详情"])
@@ -1674,7 +1765,6 @@ class PageAdmin(tk.Frame):
         conn = sqlite3.connect(DB_NAME)
         try:
           cursor = conn.cursor()
-          # 严格按照时间正序排列并编号
           cursor.execute(
               "SELECT order_time, total_amount, items_detail FROM orders ORDER"
               " BY order_time ASC"
@@ -1682,11 +1772,10 @@ class PageAdmin(tk.Frame):
           rows = cursor.fetchall()
 
           order_records = []
-          daily_counter = {}  # 用于记录每天的订单序号
+          daily_counter = {}
           for row in rows:
             o_time, o_amt, o_items = row
 
-            # 解析订单时间，提取年月日
             try:
               dt = datetime.strptime(o_time.strip(), "%Y-%m-%d %H:%M:%S")
             except ValueError:
@@ -1701,13 +1790,11 @@ class PageAdmin(tk.Frame):
             else:
               daily_counter[date_prefix] += 1
 
-            # 生成格式如 202608080001 的编号
             order_no = f"{date_prefix}{daily_counter[date_prefix]:04d}"
 
             ws1.append([order_no, o_time, o_amt, o_items])
             order_records.append((o_time, o_amt))
 
-          # Sheet 2: 销售统计
           ws2 = wb.create_sheet(title="销售统计")
           ws2.append(["统计时间段", "订单总数", "销售总额 (元)", "平均客单价 (元)"])
 
